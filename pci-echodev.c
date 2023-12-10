@@ -58,6 +58,31 @@ static int check_range(uint64_t addr, uint64_t cnt)
 
 static void fire_dma(PciechodevState *pciechodev)
 {
+	struct dma_state *dma = pciechodev->dma;
+	dma->cmd &= ~(DMA_DONE | DMA_ERROR);
+
+	if(DMA_DIR(dma->cmd) == DMA_TO_DEVICE) {
+		printf("PCIECHODEV - Transfer Data from RC to EP\n");
+		printf("pci_dma_read: src: %lx, dst: %lx, cnt: %ld, cmd: %lx\n",
+			dma->src, dma->dst, dma->cnt, dma->cmd);
+		if(check_range(dma->dst, dma->cnt) == 0) {
+			pci_dma_read(&pciechodev->pdev, dma->src,
+			pciechodev->bar1 + dma->dst, dma->cnt);
+		} else
+			dma->cmd |= (DMA_ERROR);
+	} else {
+		printf("PCIECHODEV - Transfer Data from EP to RC\n");
+		printf("pci_dma_write: src: %lx, dst: %lx, cnt: %ld, cmd: %lx\n",
+			dma->src, dma->dst, dma->cnt, dma->cmd);
+		if(check_range(dma->src, dma->cnt) == 0) {
+			pci_dma_write(&pciechodev->pdev, dma->dst,
+			pciechodev->bar1 + dma->src, dma->cnt);
+		} else
+			dma->cmd |= (DMA_ERROR);
+	}
+
+	dma->cmd &= ~(DMA_RUN);
+	dma->cmd |= (DMA_DONE);
 }
 
 static uint64_t pciechodev_bar0_mmio_read(void *opaque, hwaddr addr, unsigned size)

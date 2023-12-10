@@ -25,6 +25,28 @@ struct echodev {
 
 static int dma_transfer(struct echodev *echo, void *buffer, int count, dma_addr_t addr, enum dma_data_direction dir)
 {
+	dma_addr_t buffer_dma_addr = dma_map_single(&echo->pdev->dev, buffer, count, dir);
+
+	/* Setup the DMA controller */
+	iowrite32(count, echo->ptr_bar0 + DMA_CNT);
+
+	switch(dir) {
+		case DMA_TO_DEVICE: /* 1 */
+			iowrite32(buffer_dma_addr, echo->ptr_bar0 + DMA_SRC);
+			iowrite32(addr, echo->ptr_bar0 + DMA_DST);
+			break;
+		case DMA_FROM_DEVICE: /* 2 */
+			iowrite32(buffer_dma_addr, echo->ptr_bar0 + DMA_DST);
+			iowrite32(addr, echo->ptr_bar0 + DMA_SRC);
+			break;
+		default:
+			return -EFAULT;
+	}
+
+	/* Let's fire the dma */
+	iowrite32(DMA_RUN | dir, echo->ptr_bar0 + DMA_CMD);
+
+	dma_unmap_single(&echo->pdev->dev, buffer_dma_addr, count, dir);
 	return 0;
 }
 
