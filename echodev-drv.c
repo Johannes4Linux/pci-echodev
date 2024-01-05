@@ -5,6 +5,9 @@
 #include <linux/fs.h>
 #include <linux/uaccess.h>
 #include <linux/dmaengine.h>
+#include <linux/list.h>
+#include <linux/cdev.h>
+#include <linux/mutex.h>
 
 #include "echodev-cmd.h"
 
@@ -23,7 +26,15 @@
 struct echodev {
 	struct pci_dev *pdev;
 	void __iomem *ptr_bar0;
-} mydev;
+	struct list_head list;
+	struct cdev cdev;
+	dev_t dev_nr;
+};
+
+/* Global Variables */
+LIST_HEAD(card_list);
+static struct mutex lock;
+static int card_count = 0;
 
 static int dma_transfer(struct echodev *echo, void *buffer, int count, dma_addr_t addr, enum dma_data_direction dir)
 {
@@ -52,11 +63,25 @@ static int dma_transfer(struct echodev *echo, void *buffer, int count, dma_addr_
 	return 0;
 }
 
+static int echo_open(struct inode *inode, struct file *file)
+{
+	struct echodev *echo;
+	dev_t dev_nr = inode->i_rdev;
+
+	list_for_each_entry(echo, &card_list, list) {
+		if(echo->dev_nr == dev_nr) {
+			file->private_data = echo;
+			return 0;
+		}
+	}
+	return -ENODEV;
+}
+
 static ssize_t echo_write(struct file *file, const char __user *user_buffer, size_t count, loff_t *offs)
 {
         char *buf;
         int not_copied, to_copy = (count + *offs < 4096) ? count : 4096 - *offs;
-        struct echodev *echo = &mydev;
+        struct echodev *echo = (struct echodev *) file->private_data;
 
         if(*offs >= pci_resource_len(echo->pdev, 1))
                 return 0;
@@ -74,7 +99,7 @@ static ssize_t echo_write(struct file *file, const char __user *user_buffer, siz
 static ssize_t echo_read(struct file *file, char __user *user_buffer, size_t count, loff_t *offs)
 {
         char *buf;
-        struct echodev *echo = &mydev;
+        struct echodev *echo = (struct echodev *) file->private_data;
         int not_copied, to_copy = (count + *offs < pci_resource_len(echo->pdev, 1)) ? count : pci_resource_len(echo->pdev, 1) - *offs;
 
         if(to_copy == 0)
@@ -82,7 +107,7 @@ static ssize_t echo_read(struct file *file, char __user *user_buffer, size_t cou
 
         buf = kmalloc(to_copy, GFP_ATOMIC);
 
-        dma_transfer(&mydev, buf, to_copy, *offs, DMA_FROM_DEVICE);
+        dma_transfer(echo, buf, to_copy, *offs, DMA_FROM_DEVICE);
 
         mdelay(5);
         not_copied = copy_to_user(user_buffer, buf, to_copy);
@@ -95,8 +120,9 @@ static ssize_t echo_read(struct file *file, char __user *user_buffer, size_t cou
 static int echo_mmap(struct file *file, struct vm_area_struct *vma)
 {
 	int status;
+	struct echodev *echo = (struct echodev *) file->private_data;
 
-	vma->vm_pgoff = pci_resource_start(mydev.pdev, 1) >> PAGE_SHIFT;
+	vma->vm_pgoff = pci_resource_start(echo->pdev, 1) >> PAGE_SHIFT;
 
 	status = io_remap_pfn_range(vma, vma->vm_start, vma->vm_pgoff, vma->vm_end
 	- vma->vm_start, vma->vm_page_prot);
@@ -109,7 +135,7 @@ static int echo_mmap(struct file *file, struct vm_area_struct *vma)
 
 static long int echo_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 {
-	struct echodev *echo = &mydev;
+	struct echodev *echo = (struct echodev *) file->private_data;
 	u32 val;
 
 	switch(cmd) {
@@ -133,6 +159,7 @@ static long int echo_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 }
 
 static struct file_operations fops = {
+	.open = echo_open,
 	.mmap = echo_mmap,
 	.read = echo_read,
 	.write = echo_write,
@@ -148,62 +175,62 @@ MODULE_DEVICE_TABLE(pci, echo_ids);
 static int echo_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
 	int status;
-	void __iomem *ptr_bar0, __iomem *ptr_bar1;
+	struct echodev *echo;
 
-	mydev.pdev = pdev;
+	echo = devm_kzalloc(&pdev->dev, sizeof(struct echodev), GFP_KERNEL);
+	if(!echo)
+		return -ENOMEM;
 
-	status = register_chrdev(DEVNR, DEVNRNAME, &fops);
+	mutex_lock(&lock);
+	cdev_init(&echo->cdev, &fops);
+	echo->cdev.owner = THIS_MODULE;
+
+	echo->dev_nr = MKDEV(DEVNR, card_count++);
+	status = cdev_add(&echo->cdev, echo->dev_nr, 1);
 	if(status < 0) {
-		printk("echodev-drv - Error allocating device number\n");
-		goto fdev;
+		printk("echodev-drv - Error adding cdev\n");
+		return status;
 	}
+
+	list_add_tail(&echo->list, &card_list);
+	mutex_unlock(&lock);
+
+	echo->pdev = pdev;
 
 	status = pcim_enable_device(pdev);
 	if(status != 0) {
-		printk("echodev-drv - Error enabling devie\n");
+		printk("echodev-drv - Error enabling device\n");
 		goto fdev;
 	}
 
 	pci_set_master(pdev);
 
-	ptr_bar0 = pcim_iomap(pdev, 0, pci_resource_len(pdev, 0));
-	mydev.ptr_bar0 = ptr_bar0;
-	if(!ptr_bar0) {
+	echo->ptr_bar0 = pcim_iomap(pdev, 0, pci_resource_len(pdev, 0));
+	if(!echo->ptr_bar0) {
 		printk("echodev-drv - Error mapping BAR0\n");
 		status = -ENODEV;
 		goto fdev;
 	}
-	ptr_bar1 = pcim_iomap(pdev, 1, pci_resource_len(pdev, 1));
-	if(!ptr_bar1) {
-		printk("echodev-drv - Error mapping BAR1\n");
-		status = -ENODEV;
-		goto fdev;
-	}
-
-	printk("echodev-drv - ID: 0x%x\n", ioread32(ptr_bar0));
-	printk("echodev-drv - Random Value: 0x%x\n", ioread32(ptr_bar0 + 0xc));
-
-	iowrite32(0x11223344, ptr_bar0 + 4);
-	mdelay(1);
-	printk("echodev-drv - Inverse Pattern: 0x%x\n", ioread32(ptr_bar0 + 0x4));
-
-	iowrite32(0x44332211, ptr_bar1);
-	printk("echodev-drv - BAR1 Offset 0: 0x%x\n", ioread8(ptr_bar1));
-	printk("echodev-drv - BAR1 Offset 0: 0x%x\n", ioread16(ptr_bar1));
-	printk("echodev-drv - BAR1 Offset 0: 0x%x\n", ioread32(ptr_bar1));
 
 	return 0;
 
 fdev:
-	unregister_chrdev(DEVNR, DEVNRNAME);
+	/* Removing echo from list is missing */
+	cdev_del(&echo->cdev);
 	return status;
 
 }
 
 static void echo_remove(struct pci_dev *pdev)
 {
+	struct echodev *echo, *next;
 	printk("echodev-drv - Removing the device\n");
-	unregister_chrdev(DEVNR, DEVNRNAME);
+	list_for_each_entry_safe(echo, next, &card_list, list) {
+		if(echo->pdev == pdev) {
+			list_del(&echo->list);
+			cdev_del(&echo->cdev);
+		}
+	}
 }
 
 static struct pci_driver echo_driver = {
@@ -213,6 +240,36 @@ static struct pci_driver echo_driver = {
 	.id_table = echo_ids,
 };
 
-module_pci_driver(echo_driver);
+static int __init echo_init(void)
+{
+	int status;
+	dev_t dev_nr = MKDEV(DEVNR, 0);
+
+	status = register_chrdev_region(dev_nr, MINORMASK + 1, DEVNRNAME);
+	if(status < 0) {
+		printk("echodev-drv - Error registering Device numbers\n");
+		return status;
+	}
+
+	mutex_init(&lock);
+
+	status = pci_register_driver(&echo_driver);
+	if(status < 0) {
+		printk("echodev-drv - Error registering driver\n");
+		unregister_chrdev_region(dev_nr, MINORMASK + 1);
+		return status;
+	}
+	return 0;
+}
+
+static void __exit echo_exit(void)
+{
+	dev_t dev_nr = MKDEV(DEVNR, 0);
+	unregister_chrdev_region(dev_nr, MINORMASK + 1);
+	pci_unregister_driver(&echo_driver);
+}
+
+module_init(echo_init);
+module_exit(echo_exit);
 
 MODULE_LICENSE("GPL");

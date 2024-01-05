@@ -14,7 +14,7 @@ int main(int argc, char **argv)
 	uint32_t value;
 
 	if(argc != 3 && argc != 4) {
-		printf("USage: %s <devfile> <cmd> [<arg>]\n", argv[0]);
+		printf("Usage: %s <devfile> <cmd> [<arg>]\n", argv[0]);
 		return 0;
 	}
 
@@ -34,7 +34,7 @@ int main(int argc, char **argv)
 		status = ioctl(fd, GET_RAND, &value);
 		printf("ioctl returned %d, Random Value Register: 0x%x\n", status, value);
 	} else if (strcmp(argv[2], "SET_INV") == 0) {
-		value = strtol(argv[3], 0, 0);
+		value = strtoll(argv[3], 0, 0);
 		status = ioctl(fd, SET_INV, &value);
 		printf("ioctl returned %d\n", status);
 	} else {
