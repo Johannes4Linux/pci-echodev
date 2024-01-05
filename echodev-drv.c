@@ -212,6 +212,8 @@ static int echo_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 		goto fdev;
 	}
 
+	pci_set_drvdata(pdev, echo);
+
 	return 0;
 
 fdev:
@@ -223,13 +225,14 @@ fdev:
 
 static void echo_remove(struct pci_dev *pdev)
 {
-	struct echodev *echo, *next;
-	printk("echodev-drv - Removing the device\n");
-	list_for_each_entry_safe(echo, next, &card_list, list) {
-		if(echo->pdev == pdev) {
-			list_del(&echo->list);
-			cdev_del(&echo->cdev);
-		}
+	struct echodev *echo = (struct echodev *) pci_get_drvdata(pdev);
+	printk("echodev-drv - Removing the device with Device Number %d:%d\n",
+	MAJOR(echo->dev_nr), MINOR(echo->dev_nr));
+	if(echo) {
+		mutex_lock(&lock);
+		list_del(&echo->list);
+		mutex_unlock(&lock);
+		cdev_del(&echo->cdev);
 	}
 }
 
