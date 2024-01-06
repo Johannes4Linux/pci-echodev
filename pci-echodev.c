@@ -107,7 +107,6 @@ static void pciechodev_bar0_mmio_write(void *opaque, hwaddr addr, uint64_t val,
 
 	switch(addr) {
 		case ID_REGISTER:
-		case IRQ_REGISTER:
 		case RANDVAL_REGISTER:
 			/* 0 and 12 are read only */
 			break;
@@ -118,6 +117,13 @@ static void pciechodev_bar0_mmio_write(void *opaque, hwaddr addr, uint64_t val,
 			pciechodev->dma->cmd = val;
 			if(val & DMA_RUN)
 				fire_dma(pciechodev);
+			break;
+		case IRQ_REGISTER:
+			if(val & 1)
+				pci_set_irq(&pciechodev->pdev, 1);
+			else if(val & 2)
+				pci_set_irq(&pciechodev->pdev, 0);
+			pciechodev->bar0[addr/4] = val;
 			break;
 		default:
 			pciechodev->bar0[addr/4] = val;
@@ -204,8 +210,6 @@ static void pci_pciechodev_realize(PCIDevice *pdev, Error **errp)
 	uint8_t *pci_conf = pdev->config;
 
 	pci_config_set_interrupt_pin(pci_conf, 1);
-	if(msi_init(pdev, 0, 1, true, false, errp))
-		return;
 
 	///initial configuration of devices registers.
 	memset(pciechodev->bar0, 0, 64);

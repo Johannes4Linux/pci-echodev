@@ -37,6 +37,9 @@ int main(int argc, char **argv)
 		value = strtoll(argv[3], 0, 0);
 		status = ioctl(fd, SET_INV, &value);
 		printf("ioctl returned %d\n", status);
+	} else if(strcmp(argv[2], "IRQ") == 0) {
+		status = ioctl(fd, IRQ, NULL);
+		printf("ioctl returned %d, IRQ was triggered\n", status);
 	} else {
 		printf("%s is not a valid cmd\n", argv[2]);
 	}

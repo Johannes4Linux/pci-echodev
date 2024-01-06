@@ -36,6 +36,16 @@ LIST_HEAD(card_list);
 static struct mutex lock;
 static int card_count = 0;
 
+static irqreturn_t echo_irq_handler(int irq_nr, void *data)
+{
+	struct echodev *echo = (struct echodev *) data;
+	if(ioread32(echo->ptr_bar0 + 8) & 0x1) {
+		printk("echodev-drv - Legacy IRQ triggered!\n");
+		iowrite32(2, echo->ptr_bar0 + 8);
+	}
+	return IRQ_HANDLED;
+}
+
 static int dma_transfer(struct echodev *echo, void *buffer, int count, dma_addr_t addr, enum dma_data_direction dir)
 {
 	dma_addr_t buffer_dma_addr = dma_map_single(&echo->pdev->dev, buffer, count, dir);
@@ -153,6 +163,9 @@ static long int echo_ioctl(struct file *file, unsigned cmd, unsigned long arg)
 				return -EFAULT;
 			iowrite32(val, echo->ptr_bar0 + 0x4);
 			return 0;
+		case IRQ:
+			iowrite32(1, echo->ptr_bar0 + 0x8);
+			return 0;
 		default:
 			return -EINVAL;
 	}
@@ -174,7 +187,7 @@ MODULE_DEVICE_TABLE(pci, echo_ids);
 
 static int echo_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 {
-	int status;
+	int status, irq_nr;
 	struct echodev *echo;
 
 	echo = devm_kzalloc(&pdev->dev, sizeof(struct echodev), GFP_KERNEL);
@@ -214,6 +227,23 @@ static int echo_probe(struct pci_dev *pdev, const struct pci_device_id *id)
 
 	pci_set_drvdata(pdev, echo);
 
+	status = pci_alloc_irq_vectors(pdev, 1, 1, PCI_IRQ_ALL_TYPES);
+	if(status != 1) {
+		printk("echodev-drv - Error alloc_irq returned %d\n", status);
+		status = -ENODEV;
+		goto fdev;
+	}
+
+	irq_nr = pci_irq_vector(pdev, 0);
+	printk("echodev-drv - IRQ Number: %d\n", irq_nr);
+
+	status = devm_request_irq(&pdev->dev, irq_nr, echo_irq_handler, 0,
+	"echodev-irq", echo);
+	if(status != 0) {
+		printk("echodev-drv - Error requesting interrupt\n");
+		goto fdev;
+	}
+
 	return 0;
 
 fdev:
@@ -234,6 +264,7 @@ static void echo_remove(struct pci_dev *pdev)
 		mutex_unlock(&lock);
 		cdev_del(&echo->cdev);
 	}
+	pci_free_irq_vectors(pdev);
 }
 
 static struct pci_driver echo_driver = {
